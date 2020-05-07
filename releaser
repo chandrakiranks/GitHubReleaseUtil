@@ -1,0 +1,190 @@
+#!/bin/bash
+set -e
+
+echo "GitHub Repo URL"
+echo $GIT_REPO
+
+echo "Repo Branch"
+if [ "${RELEASE_BRANCH}" == "" ]; then
+    RELEASE_BRANCH='master'
+fi
+echo $RELEASE_BRANCH
+
+# releaser pre-release
+
+# If latest release tag is published, create a new pre-release tag directly
+# else if the latest tag is pre-release
+#   check for commit hashs of latest pre-release tag and release branch
+#    if they are same, no need to create pre-release tag
+#    if thet are not same, create pre-release tag
+
+checkRepoStatus()
+{
+  # flag to decide the new pre release creation
+  createPreRelease=false
+
+  # API to get the latest release tags
+  GIT_REPO_RELEASES=$GIT_REPO_API"/releases"
+
+  rm releases.json
+  curl -sb -H "Accept: application/json" "$GIT_REPO_RELEASES" >> releases.json
+
+  preReleaseArray=( $(jq -r '.[].prerelease' releases.json) )
+  preRelease=${preReleaseArray[0]}
+
+  tagNameArray=( $(jq -r '.[].tag_name' releases.json) )
+  tagName=${tagNameArray[0]}
+
+  echo $preRelease
+  echo $tagName
+
+  if [ "$preRelease" == "false" ] ; then
+    # go ahead with new pre-release tag
+    createPreRelease=true
+  elif [ "$preRelease" == "true" ]; then
+
+    echo "Getting commits from both release (${RELEASE_BRANCH}) and latest pre release tag (${tagName})"
+
+    # Need to check for new commit in the Release branch
+    # if there are any new commits, create new pre-release tag
+    # else DONT create pre release tag
+
+    # getting latest commit from release branch
+    rm -rf releasebranchcommits.json
+    GIT_REPO_RELEASE_BRANCH_COMMIT=$GIT_REPO_API"/commits?sha="$RELEASE_BRANCH
+    curl -sb -H "Accept: application/json" "$GIT_REPO_RELEASE_BRANCH_COMMIT" >> releasebranchcommits.json
+    branchCommitsArray=( $(jq -r '.[].sha' releasebranchcommits.json) )
+    branchCommit="${branchCommitsArray[0]}"
+
+    # getting latest commit from release tag
+    rm -rf releasetagcommits.json
+    GIT_REPO_RELEASE_TAG_COMMIT=$GIT_REPO_API"/commits?sha="$tagName
+    curl -sb -H "Accept: application/json" "$GIT_REPO_RELEASE_TAG_COMMIT" >> releasetagcommits.json
+    tagCommitsArray=( $(jq -r '.[].sha' releasetagcommits.json) )
+    tagCommit="${tagCommitsArray[0]}"
+
+    # comparing commit hashs
+    echo "${branchCommit} --- ${tagCommit}"
+
+    if [ "$branchCommit" == "$tagCommit" ]; then
+      echo "There is a new commit in release branch (${RELEASE_BRANCH}), proceeding to create new pre release tag"
+      createPreRelease=true
+    else
+      echo "There are no new changes in release branch when compared to last pre release tag i.e ${tagName}. So no need to create new pre release tag."
+    fi
+
+  fi
+
+
+
+  # calculating new release tag version and calling create pre release function
+  newPreReleaseVersion=''
+  if [ $createPreRelease == true ]; then
+      newPreReleaseVersion=$(incrementVerion "$tagName")
+      echo "New pre release tag number is ${newPreReleaseVersion}"
+      createPreReleaseTag $newPreReleaseVersion
+  fi
+}
+
+incrementVerion()
+{
+  oldVersion=$1
+  major=`echo $oldVersion | cut -d "." -f 1`
+  minor=`echo $oldVersion | cut -d "." -f 2`
+  patch=`echo $oldVersion | cut -d "." -f 3`
+  i=1
+  patch=$(($patch + $i))
+  newVersion=$major.$minor.$patch
+  echo $newVersion
+}
+
+getLatestRelease()
+{
+  # API to get the latest release tags
+  GIT_REPO_LATEST_RELEASES=$GIT_REPO_API"/releases/latest"
+
+  # making curl call, getting tag_name and trimming " in that tag_name
+  latestReleaseTag=$(curl -sb -H "Accept: application/json" "$GIT_REPO_LATEST_RELEASES" | jq '.tag_name' | sed -e 's/^"//' -e 's/"$//')
+  echo $latestReleaseTag
+}
+
+createPreReleaseTag()
+{
+  # inputs
+  # new pre release tag version - TAG_VERSION
+  # branch name to create pre release tag - RELEASE_BRANCH
+  # new last pubished tag to get the release change log - LAST_RELEASED_TAG
+
+  TAG_VERSION=$1
+
+  # getting latest published release tag
+  LAST_RELEASED_TAG=$(getLatestRelease)
+
+  # checking out repo
+  git config --global user.email "mobile-web@flipkart.com" && git config --global user.name "Jenkins"
+
+  rm -rf $GIT_REPO_NAME
+
+  git clone $GIT_REPO".git"
+  cd ${GIT_REPO_NAME}
+  git status
+
+  echo "fetching..."
+  git fetch
+
+  echo "checking out ${RELEASE_BRANCH}"
+  git checkout ${RELEASE_BRANCH}
+  git status
+
+  echo "Checking out ${LAST_RELEASED_TAG}"
+  git checkout ${LAST_RELEASED_TAG}
+  git status
+
+  echo "getting change log between ${RELEASE_BRANCH} ... ${LAST_RELEASED_TAG}"
+
+  CHANGE_LOG=$(git log --pretty=format:"%h | %an | %s" "${RELEASE_BRANCH}"..."${LAST_RELEASED_TAG}")
+  CHANGE_LOG=${CHANGE_LOG//$'\n'/$'<br/>'}
+  CHANGE_LOG=${CHANGE_LOG//$'"'/$''}
+
+  generateReleasePayload()
+  {
+    cat <<EOF
+    {
+      "tag_name": "${TAG_VERSION}",
+      "target_commitish": "${RELEASE_BRANCH}",
+      "name": "${TAG_VERSION}",
+      "body": "${CHANGE_LOG}",
+      "draft": false,
+      "prerelease": true
+    }
+EOF
+  }
+
+  # making post call to github to create the pre-release tag
+  echo "Creating pre release tag version: ${TAG_VERSION} branch:${RELEASE_BRANCH}"
+  curl -X POST -i --data "$(generateReleasePayload)" "${GIT_REPO_API}/releases"
+
+}
+
+getGITRepoAPI()
+{
+  IFS='/' read -ra ADDR <<< "$GIT_REPO"
+  GIT_REPO_API="${ADDR[0]}//${ADDR[2]}/api/v3/repos/${ADDR[3]}/${ADDR[4]}"
+  export GIT_REPO_API=$GIT_REPO_API
+  export GIT_REPO_NAME=${ADDR[4]}
+}
+
+preRelease()
+{
+  echo "Constructing GIT_REPO_API from GIT_REPO"
+  getGITRepoAPI
+  echo $GIT_REPO_API
+  echo $GIT_REPO_NAME
+
+  checkRepoStatus
+}
+
+if [ "$1" == "pre-release" ]
+then
+  preRelease
+fi
