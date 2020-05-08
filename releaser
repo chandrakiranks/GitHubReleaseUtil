@@ -66,7 +66,7 @@ checkRepoStatus()
     # comparing commit hashs
     echo "${branchCommit} --- ${tagCommit}"
 
-    if [ "$branchCommit" == "$tagCommit" ]; then
+    if [ "$branchCommit" != "$tagCommit" ]; then
       echo "There is a new commit in release branch (${RELEASE_BRANCH}), proceeding to create new pre release tag"
       createPreRelease=true
     else
