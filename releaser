@@ -26,7 +26,7 @@ checkRepoStatus()
   # API to get the latest release tags
   GIT_REPO_RELEASES=$GIT_REPO_API"/releases"
 
-  rm releases.json
+  rm -rf releases.json
   curl -sb -H "Accept: application/json" "$GIT_REPO_RELEASES" >> releases.json
 
   preReleaseArray=( $(jq -r '.[].prerelease' releases.json) )
